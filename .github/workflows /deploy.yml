@@ -1,4 +1,4 @@
-name: Deploy to Cloud Run
+name: Build and Deploy to Cloud Run
 
 on:
   push:
@@ -8,8 +8,10 @@ on:
 env:
   PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
   REGION: ${{ secrets.GCP_REGION }}
-  REPOSITORY: ${{ secrets.GAR_REPO }}
   SERVICE: ${{ secrets.CLOUD_RUN_SERVICE }}
+  GAR_REPO: ${{ secrets.GAR_REPO }}
+  WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.WIF_PROVIDER }}
+  WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
 jobs:
   deploy:
@@ -23,24 +25,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud
+      - id: auth
+        name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
-          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
 
-      - name: Configure Docker
-        run: gcloud auth configure-docker $REGION-docker.pkg.dev
+      - name: Docker Auth
+        uses: docker/login-action@v3
+        with:
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.auth_token }}
+          registry: ${{ env.REGION }}-docker.pkg.dev
 
-      - name: Build and Push Docker Image
+      - name: Build and Push Container
         run: |
-          docker build -t $REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/app:latest .
-          docker push $REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/app:latest
+          DOCKER_TAG="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.GAR_REPO }}/${{ env.SERVICE }}:${{ github.sha }}"
+          docker build -t "$DOCKER_TAG" .
+          docker push "$DOCKER_TAG"
 
-      - name: Deploy to Cloud Run
-        run: |
-          gcloud run deploy $SERVICE \
-            --image $REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/app:latest \
-            --region $REGION \
-            --platform managed \
-            --allow-unauthenticated
+      - id: deploy
+        name: Deploy to Cloud Run
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.SERVICE }}
+          region: ${{ env.REGION }}
+          image: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.GAR_REPO }}/${{ env.SERVICE }}:${{ github.sha }}
+
+      - name: Show output
+        run: echo "${{ steps.deploy.outputs.url }}"
